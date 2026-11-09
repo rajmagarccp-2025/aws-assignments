@@ -1,0 +1,15 @@
+aws_region     = "ap-south-1"
+aws_profile    = "account-a"
+account_a_id   = "REPLACE_WITH_12_DIGIT_ACCOUNT_A_ID"
+account_b_id   = "REPLACE_WITH_12_DIGIT_ACCOUNT_B_ID"
+console_login_pgp_key = "REPLACE_WITH_BASE64_ENCODED_PGP_PUBLIC_KEY"
+enable_assignment_iam_users = true
+enable_assignment_iam_access_keys = true
+enable_assignment_role_a_broad_permissions = true
+ci_ecr_repository_name = "assignment-app"
+ci_ecs_cluster_name = "assignment-cluster"
+ci_ecs_service_name = "assignment-service"
+ci_ecs_task_family = "assignment-app"
+ci_task_execution_role_name = "assignment-task-execution"
+ci_task_role_name = "assignment-task"
+ci_build_artifacts_bucket = "replace-with-build-artifacts-bucket"

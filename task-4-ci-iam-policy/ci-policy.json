@@ -1,0 +1,67 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ECRAuthentication",
+      "Effect": "Allow",
+      "Action": "ecr:GetAuthorizationToken",
+      "Resource": "*"
+    },
+    {
+      "Sid": "PushToOneECRRepository",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:CompleteLayerUpload",
+        "ecr:InitiateLayerUpload",
+        "ecr:PutImage",
+        "ecr:UploadLayerPart"
+      ],
+      "Resource": "arn:aws:ecr:${region}:${account_id}:repository/${ecr_repository}"
+    },
+    {
+      "Sid": "RegisterAndInspectOneTaskDefinitionFamily",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:DescribeTaskDefinition",
+        "ecs:RegisterTaskDefinition"
+      ],
+      "Resource": "arn:aws:ecs:${region}:${account_id}:task-definition/${ecs_task_family}:*"
+    },
+    {
+      "Sid": "DeployToOneECSService",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:DescribeServices",
+        "ecs:UpdateService"
+      ],
+      "Resource": "arn:aws:ecs:${region}:${account_id}:service/${ecs_cluster}/${ecs_service}"
+    },
+    {
+      "Sid": "PassOnlyTaskRolesToECS",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": [
+        "arn:aws:iam::${account_id}:role/${task_execution_role_name}",
+        "arn:aws:iam::${account_id}:role/${task_role_name}"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "ecs-tasks.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "ListOnlyBuildArtifactsBucket",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::${build_artifacts_bucket}"
+    },
+    {
+      "Sid": "ReadOnlyBuildArtifactObjects",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::${build_artifacts_bucket}/*"
+    }
+  ]
+}

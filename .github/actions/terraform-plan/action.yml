@@ -1,0 +1,90 @@
+name: Terraform plan
+description: Initialize, validate, refresh, plan, show, and securely save a Terraform plan
+inputs:
+  root:
+    description: Terraform configuration directory relative to the repository root
+    required: true
+  tfvars-content:
+    description: Terraform variables file content
+    required: true
+  artifact-name:
+    description: Name for the saved plan artifact
+    required: true
+  state-key:
+    description: Unique S3 state key
+    required: true
+  use-backend:
+    description: Whether to initialize the configured S3 backend
+    required: true
+  aws-region:
+    description: AWS region
+    required: true
+  state-bucket:
+    description: S3 state bucket
+    required: true
+  lock-table:
+    description: DynamoDB lock table
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Write Terraform variables
+      shell: bash
+      env:
+        TFVARS_CONTENT: ${{ inputs.tfvars-content }}
+        ROOT: ${{ inputs.root }}
+      run: |
+        set -euo pipefail
+        if [[ -z "$TFVARS_CONTENT" ]]; then
+          echo "Terraform variables content is empty." >&2
+          exit 1
+        fi
+        umask 077
+        printf '%s\n' "$TFVARS_CONTENT" > "$GITHUB_WORKSPACE/$ROOT/terraform.tfvars"
+
+    - name: Initialize Terraform
+      shell: bash
+      env:
+        ROOT: ${{ inputs.root }}
+        USE_BACKEND: ${{ inputs.use-backend }}
+        AWS_REGION: ${{ inputs.aws-region }}
+        STATE_BUCKET: ${{ inputs.state-bucket }}
+        LOCK_TABLE: ${{ inputs.lock-table }}
+        STATE_KEY: ${{ inputs.state-key }}
+      working-directory: ${{ github.workspace }}/${{ inputs.root }}
+      run: |
+        set -euo pipefail
+        if [[ "$USE_BACKEND" == "true" ]]; then
+          umask 077
+          cat > backend.hcl <<EOF
+        bucket         = "$STATE_BUCKET"
+        key            = "$STATE_KEY"
+        region         = "$AWS_REGION"
+        dynamodb_table = "$LOCK_TABLE"
+        encrypt        = true
+        use_lockfile   = true
+        EOF
+          terraform init -input=false -no-color -reconfigure -backend-config=backend.hcl
+        else
+          terraform init -input=false -no-color -backend=false
+        fi
+
+    - name: Validate and create plan
+      shell: bash
+      env:
+        ROOT: ${{ inputs.root }}
+      working-directory: ${{ github.workspace }}/${{ inputs.root }}
+      run: |
+        set -euo pipefail
+        terraform fmt -check -no-color
+        terraform validate -no-color
+        terraform plan -input=false -no-color -refresh=true -out=tfplan
+        terraform show -no-color tfplan
+
+    - name: Save plan for the protected apply job
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ inputs.root }}/tfplan
+        if-no-files-found: error
+        retention-days: 1

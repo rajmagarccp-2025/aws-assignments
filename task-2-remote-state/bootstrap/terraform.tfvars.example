@@ -1,0 +1,6 @@
+aws_region       = "ap-south-1"
+aws_profile      = "assignment"
+aws_account_id   = "REPLACE_WITH_12_DIGIT_ACCOUNT_ID"
+state_bucket_name = "REPLACE_WITH_GLOBALLY_UNIQUE_STATE_BUCKET"
+lock_table_name  = "terraform-state-lock"
+state_kms_key_arn = null

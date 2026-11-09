@@ -1,0 +1,9 @@
+{
+  "ecr_repository": "assignment-app",
+  "ecs_cluster": "assignment-cluster",
+  "ecs_service": "assignment-service",
+  "ecs_task_family": "assignment-app",
+  "task_execution_role": "assignment-task-execution",
+  "task_role": "assignment-task",
+  "build_artifacts_bucket": "replace-with-build-artifacts-bucket"
+}

@@ -1,0 +1,6 @@
+aws_region              = "ap-south-1"
+aws_profile             = "account-b"
+account_a_id            = "REPLACE_WITH_12_DIGIT_ACCOUNT_A_ID"
+account_b_id            = "REPLACE_WITH_12_DIGIT_ACCOUNT_B_ID"
+production_bucket_name  = "company-production-data"
+enable_assignment_full_s3_access = true

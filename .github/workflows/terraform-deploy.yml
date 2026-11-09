@@ -1,0 +1,371 @@
+name: Deploy Terraform assignment
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-assignment-deploy
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+  TF_LOCK_TABLE: ${{ vars.TF_LOCK_TABLE }}
+
+jobs:
+  checks:
+    name: Static checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Terraform and IAM policy checks
+        run: |
+          bash scripts/validate.sh
+          bash scripts/test-iam-policies.sh
+
+  backend-check:
+    name: Check remote state resources
+    needs: checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      bootstrap_needed: ${{ steps.check.outputs.bootstrap_needed }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+          terraform_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_BOOTSTRAP_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Check bucket and lock table
+        id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${TF_STATE_BUCKET:?Set the TF_STATE_BUCKET repository variable}"
+          : "${TF_LOCK_TABLE:?Set the TF_LOCK_TABLE repository variable}"
+
+          set +e
+          bucket_result="$(aws s3api get-bucket-versioning --bucket "$TF_STATE_BUCKET" 2>&1)"
+          bucket_status=$?
+          table_result="$(aws dynamodb describe-table --table-name "$TF_LOCK_TABLE" 2>&1)"
+          table_status=$?
+          set -e
+
+          bucket_missing=false
+          table_missing=false
+          if [[ $bucket_status -eq 0 ]]; then
+            bucket_missing=false
+          elif grep -Eqi 'NoSuchBucket|404' <<< "$bucket_result"; then
+            bucket_missing=true
+          else
+            echo "Could not check the state bucket; refusing to treat an access or configuration error as absence." >&2
+            echo "$bucket_result" >&2
+            exit 1
+          fi
+
+          if [[ $table_status -eq 0 ]]; then
+            table_missing=false
+          elif grep -Eqi 'ResourceNotFoundException|ResourceNotFound|not found' <<< "$table_result"; then
+            table_missing=true
+          else
+            echo "Could not check the lock table; refusing to treat an access or configuration error as absence." >&2
+            echo "$table_result" >&2
+            exit 1
+          fi
+
+          if [[ "$bucket_missing" == "true" && "$table_missing" == "true" ]]; then
+            echo "Remote state resources are absent; the bootstrap root will create them."
+            echo "bootstrap_needed=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$bucket_missing" == "false" && "$table_missing" == "false" ]]; then
+            echo "Remote state bucket and lock table are available."
+            echo "bootstrap_needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Only one remote state resource exists. Refusing automatic partial bootstrap; repair the backend first." >&2
+            exit 1
+          fi
+
+  bootstrap-plan:
+    name: Plan backend bootstrap
+    needs: [checks, backend-check]
+    if: needs.backend-check.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+          terraform_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_BOOTSTRAP_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: ./.github/actions/terraform-plan
+        with:
+          root: task-2-remote-state/bootstrap
+          tfvars-content: ${{ secrets.BOOTSTRAP_TFVARS }}
+          artifact-name: bootstrap-plan
+          state-key: devops-assignment/bootstrap/terraform.tfstate
+          use-backend: ${{ needs.backend-check.outputs.bootstrap_needed == 'false' }}
+          aws-region: ${{ vars.AWS_REGION }}
+          state-bucket: ${{ vars.TF_STATE_BUCKET }}
+          lock-table: ${{ vars.TF_LOCK_TABLE }}
+
+  bootstrap-apply:
+    name: Apply backend bootstrap
+    needs: [backend-check, bootstrap-plan]
+    if: needs.bootstrap-plan.result == 'success'
+    runs-on: ubuntu-latest
+    environment: terraform-apply
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+          terraform_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_BOOTSTRAP_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: bootstrap-plan
+          path: task-2-remote-state/bootstrap
+      - uses: ./.github/actions/terraform-apply
+        with:
+          root: task-2-remote-state/bootstrap
+          artifact-name: bootstrap-plan
+          state-key: devops-assignment/bootstrap/terraform.tfstate
+          use-backend: ${{ needs.backend-check.outputs.bootstrap_needed == 'false' }}
+          aws-region: ${{ vars.AWS_REGION }}
+          state-bucket: ${{ vars.TF_STATE_BUCKET }}
+          lock-table: ${{ vars.TF_LOCK_TABLE }}
+      - name: Migrate initial bootstrap state into S3
+        if: needs.backend-check.outputs.bootstrap_needed == 'true'
+        shell: bash
+        working-directory: task-2-remote-state/bootstrap
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+          TF_LOCK_TABLE: ${{ vars.TF_LOCK_TABLE }}
+        run: |
+          set -euo pipefail
+          umask 077
+          cat > backend.hcl <<EOF
+          bucket         = "$TF_STATE_BUCKET"
+          key            = "devops-assignment/bootstrap/terraform.tfstate"
+          region         = "$AWS_REGION"
+          dynamodb_table = "$TF_LOCK_TABLE"
+          encrypt        = true
+          use_lockfile   = true
+          EOF
+          terraform init -input=false -no-color -migrate-state -force-copy -backend-config=backend.hcl
+
+  task-1-plan:
+    name: Plan EC2 task
+    needs: [checks, backend-check, bootstrap-apply]
+    if: >-
+      always() &&
+      needs.checks.result == 'success' &&
+      needs.backend-check.result == 'success' &&
+      needs.bootstrap-apply.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+          terraform_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_TASK1_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: ./.github/actions/terraform-plan
+        with:
+          root: task-1-ec2-provisioning
+          tfvars-content: ${{ secrets.EC2_TFVARS }}
+          artifact-name: task-1-plan
+          state-key: devops-assignment/task-1-ec2/terraform.tfstate
+          use-backend: 'true'
+          aws-region: ${{ vars.AWS_REGION }}
+          state-bucket: ${{ vars.TF_STATE_BUCKET }}
+          lock-table: ${{ vars.TF_LOCK_TABLE }}
+
+  task-1-apply:
+    name: Apply EC2 task
+    needs: task-1-plan
+    runs-on: ubuntu-latest
+    environment: terraform-apply
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+          terraform_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_TASK1_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: task-1-plan
+          path: task-1-ec2-provisioning
+      - uses: ./.github/actions/terraform-apply
+        with:
+          root: task-1-ec2-provisioning
+          artifact-name: task-1-plan
+          state-key: devops-assignment/task-1-ec2/terraform.tfstate
+          use-backend: 'true'
+          aws-region: ${{ vars.AWS_REGION }}
+          state-bucket: ${{ vars.TF_STATE_BUCKET }}
+          lock-table: ${{ vars.TF_LOCK_TABLE }}
+
+  account-a-plan:
+    name: Plan Account A IAM
+    needs: [checks, backend-check, task-1-apply]
+    if: >-
+      always() &&
+      needs.checks.result == 'success' &&
+      needs.backend-check.result == 'success' &&
+      needs.task-1-apply.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+          terraform_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ACCOUNT_A_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: ./.github/actions/terraform-plan
+        with:
+          root: task-3-multi-account-iam/account-a
+          tfvars-content: ${{ secrets.ACCOUNT_A_TFVARS }}
+          artifact-name: account-a-plan
+          state-key: devops-assignment/account-a/terraform.tfstate
+          use-backend: 'true'
+          aws-region: ${{ vars.AWS_REGION }}
+          state-bucket: ${{ vars.TF_STATE_BUCKET }}
+          lock-table: ${{ vars.TF_LOCK_TABLE }}
+
+  account-a-apply:
+    name: Apply Account A IAM
+    needs: account-a-plan
+    runs-on: ubuntu-latest
+    environment: terraform-apply
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+          terraform_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ACCOUNT_A_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: account-a-plan
+          path: task-3-multi-account-iam/account-a
+      - uses: ./.github/actions/terraform-apply
+        with:
+          root: task-3-multi-account-iam/account-a
+          artifact-name: account-a-plan
+          state-key: devops-assignment/account-a/terraform.tfstate
+          use-backend: 'true'
+          aws-region: ${{ vars.AWS_REGION }}
+          state-bucket: ${{ vars.TF_STATE_BUCKET }}
+          lock-table: ${{ vars.TF_LOCK_TABLE }}
+
+  account-b-plan:
+    name: Plan Account B IAM
+    needs: [checks, backend-check, account-a-apply]
+    if: >-
+      always() &&
+      needs.checks.result == 'success' &&
+      needs.backend-check.result == 'success' &&
+      needs.account-a-apply.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+          terraform_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ACCOUNT_B_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: ./.github/actions/terraform-plan
+        with:
+          root: task-3-multi-account-iam/account-b
+          tfvars-content: ${{ secrets.ACCOUNT_B_TFVARS }}
+          artifact-name: account-b-plan
+          state-key: devops-assignment/account-b/terraform.tfstate
+          use-backend: 'true'
+          aws-region: ${{ vars.AWS_REGION }}
+          state-bucket: ${{ vars.TF_STATE_BUCKET }}
+          lock-table: ${{ vars.TF_LOCK_TABLE }}
+
+  account-b-apply:
+    name: Apply Account B IAM
+    needs: account-b-plan
+    runs-on: ubuntu-latest
+    environment: terraform-apply
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+          terraform_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ACCOUNT_B_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: account-b-plan
+          path: task-3-multi-account-iam/account-b
+      - uses: ./.github/actions/terraform-apply
+        with:
+          root: task-3-multi-account-iam/account-b
+          artifact-name: account-b-plan
+          state-key: devops-assignment/account-b/terraform.tfstate
+          use-backend: 'true'
+          aws-region: ${{ vars.AWS_REGION }}
+          state-bucket: ${{ vars.TF_STATE_BUCKET }}
+          lock-table: ${{ vars.TF_LOCK_TABLE }}

@@ -1,0 +1,46 @@
+aws_region              = "ap-south-1"
+aws_profile             = "assignment"
+aws_account_id          = "REPLACE_WITH_12_DIGIT_ACCOUNT_ID"
+environment             = "assignment"
+owner                   = "devops-assignment"
+ami_id                  = "ami-REPLACE_WITH_VALID_AMI"
+private_subnet_ids      = ["subnet-REPLACE_WITH_PRIVATE_SUBNET_A", "subnet-REPLACE_WITH_PRIVATE_SUBNET_B"]
+security_group_ids      = ["sg-REPLACE_WITH_RESTRICTED_SECURITY_GROUP"]
+instance_profile_name   = "REPLACE_WITH_LEAST_PRIVILEGE_EC2_INSTANCE_PROFILE"
+enable_assignment_ssh_key_pairs = true
+protected_instance_name = "production-db"
+
+instances = {
+  web-small = {
+    instance_type = "t3.micro"
+    volume_type   = "gp3"
+    volume_size   = 20
+    key_name      = "web-small-key"
+  }
+  api-medium = {
+    instance_type = "t3.small"
+    volume_type   = "gp2"
+    volume_size   = 30
+    key_name      = "api-medium-key"
+  }
+  batch-worker = {
+    instance_type = "t3.medium"
+    volume_type   = "standard"
+    volume_size   = 40
+    key_name      = "batch-worker-key"
+  }
+  analytics = {
+    instance_type = "m6i.large"
+    volume_type   = "io1"
+    volume_size   = 100
+    volume_iops   = 3000
+    key_name      = "analytics-key"
+  }
+  production-db = {
+    instance_type = "m6i.xlarge"
+    volume_type   = "io2"
+    volume_size   = 200
+    volume_iops   = 4000
+    key_name      = "production-db-key"
+  }
+}
